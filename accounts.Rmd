@@ -1,0 +1,188 @@
+---
+title: "Accounts"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, message=FALSE}
+library(lubridate)
+library(data.table)
+library(dplyr)
+library(formattable)
+library(tidyr)
+```
+
+## Bank
+
+The Bank Account records transactions in the following categories:
+
+- Sales
+- Purchases
+- Payments to Revenue
+- Repayments of Director's Expenses
+- Bank Charges
+
+```{r echo=FALSE}
+year <- 2025
+docs <- paste("~/Documents/company/", year, "/data/", sep="")
+date.fmt <- "%d %b %Y"
+bank_doc <- paste(docs, "bank.csv", sep="")
+
+bank <- read.csv(file = bank_doc, header=TRUE, sep=",")
+bank$date <- format(as.Date(bank$date), date.fmt)
+bank$amount <- accounting(bank$amount)
+bank$balance <- currency(cumsum(bank$amount), symbol = "€")
+
+bank <- bank[, c("date", "comment", "amount", "balance")]
+
+formattable(bank, align=c("l", "l", "r", "r"))
+```
+## Purchases
+
+Purchases are payments for goods and services made directly from the Bank Account.
+
+```{r echo=FALSE}
+purchases_doc <- paste(docs, "purchases.csv", sep="")
+purchases <- read.csv(file = purchases_doc, header=TRUE, sep=",")
+purchases$date <- format(as.Date(purchases$date), date.fmt)
+purchases$allowed[is.na(purchases$allowed)] <- 100
+purchases$allowed <- purchases$allowed / 100
+purchases$expense <- currency(purchases$amount * purchases$allowed, symbol = "€")
+purchases$amount = currency(purchases$amount, symbol = "€")
+purchases$balance = currency(cumsum(purchases$expense), symbol = "€")
+purchases$type = "P"
+
+p <- purchases[, c("date", "description", "amount", "allowed", "expense", "balance")]
+
+formattable(p, list(allowed = percent), align=c("l", "l", "r", "r", "r", "r"))
+```
+## Director's Expenses
+
+Director's Expenses are payments for goods and service made from a Director's personal account.
+
+The company may reimburse part or all of the payment, using the "allowed" column. This is a percentage,
+which defaults to 100.
+
+It is convenient to reimburse the Director when VAT is paid to Revenue. A negative entry, in the amount
+repaid, takes care of this.
+
+```{r echo=FALSE}
+expenses_doc <- paste(docs, "expenses.csv", sep="")
+expenses <- read.csv(file = expenses_doc, header=TRUE, sep=",")
+expenses$date <- format(as.Date(expenses$date), date.fmt)
+expenses$allowed[is.na(expenses$allowed)] <- 100
+expenses$allowed <- expenses$allowed / 100
+expenses$expense <- currency(expenses$amount * expenses$allowed, symbol = "€")
+expenses$amount = currency(expenses$amount, symbol = "€")
+expenses$balance = currency(cumsum(expenses$expense), symbol = "€")
+expenses$type = "E"
+
+e <- expenses[, c("date", "description", "amount", "allowed", "expense", "balance")]
+
+formattable(e, list(allowed = percent), align=c("l", "l", "r", "r", "r", "r"))
+```
+## VAT
+
+VAT is paid to Revenue several times a year, using form VAT3.
+
+The exact amount is the VAT received for Sales minus VAT paid out on Purchases and Director's Expenses.
+
+### Sales (T1)
+
+```{r echo=FALSE}
+sales_doc <- paste(docs, "sales.csv", sep="")
+sales <- read.csv(file = sales_doc, header=TRUE, sep=",")
+sales$date <- format(as.Date(sales$date), date.fmt)
+sales$vat.rate <- sales$vat.rate / 100.0
+sales$vat.amount <- currency(sales$days * sales$rate * sales$vat.rate, symbol = "€")
+sales$balance <- currency(cumsum(sales$vat.amount), symbol = "€")
+
+s <- sales[, c("date", "invoice", "month", "days", "vat.rate", "vat.amount", "balance")]
+
+formattable(s, list(vat.rate = percent), align=c("l", "l", "c", "c", "c", "r", "r"))
+```
+
+### Purchases and Expenses (T2)
+
+VAT paid on Purchases from the Bank Account (P) and Director's Expenses (E).
+
+```{r echo=FALSE}
+pur_exp <- rbind(purchases, expenses)
+pur_exp <- pur_exp[order(as.Date(pur_exp$date, format=date.fmt)),]
+#pur_exp <- pur_exp[pur_exp$amount > 0,]
+pur_exp$vat.rate[is.na(pur_exp$vat.rate)] <- 0
+pur_exp <- pur_exp[pur_exp$vat.rate > 0,]
+pur_exp$vat.rate <- pur_exp$vat.rate / 100
+pur_exp$vat.amount <- currency(pur_exp$amount / (1 + pur_exp$vat.rate) * pur_exp$vat.rate * pur_exp$allowed, symbol = "€")
+pur_exp$amount = currency(pur_exp$amount, symbol = "€")
+pur_exp$balance = currency(cumsum(pur_exp$vat.amount), symbol = "€")
+
+p <- pur_exp[, c("date", "description", "type", "amount", "vat.rate", "allowed", "vat.amount", "balance")]
+row.names(p) <- NULL
+
+formattable(p, list(vat.rate = percent, allowed = percent), align=c("l", "l", "r", "r", "r", "r", "r"))
+```
+
+### Year-to-date
+```{r echo=FALSE}
+vat3_doc <- paste(docs, "vat3.csv", sep="")
+vat3 <- read.csv(file = vat3_doc, header=TRUE, sep=",")
+vat3$date <- format(as.Date(vat3$date), date.fmt)
+vat3$start <- format(as.Date(vat3$start), date.fmt)
+vat3$end <- format(as.Date(vat3$end), date.fmt)
+vat3$sales <- currency(vat3$sales, symbol = "€")
+vat3$purchases <- currency(vat3$purchases, symbol = "€")
+vat3$payable <- currency(vat3$payable, symbol = "€")
+vat3$total <- currency(cumsum(vat3$payable), symbol = "€")
+
+formattable(vat3, align=c("l","l","l","r","r","r","r"))
+```
+
+### Balance
+```{r echo=FALSE}
+if (nrow(s) > 0) {
+  t1 <- tail(s, 1)$balance - sum(vat3$sales)
+} else {
+  t1 <- 0
+}
+if (nrow(p) > 0) {
+  t2 <- tail(p, 1)$balance - sum(vat3$purchases)
+} else {
+  t2 <- 0
+}
+z <- data.frame(date = c(format(Sys.Date(), date.fmt)), t1, t2, balance = t1-t2)
+
+formattable(z, align=c("l","r","r", "r"))
+```
+## Trading Details
+
+Trading Details are reported to Revenue at the end of the year, using form RTD.
+
+### Goods and Services
+```{r echo=FALSE}
+p1 <- currency(sum(sales$amount), symbol = "€")
+z1 <- p1
+supplies <- data.table(label = c("Std Rate", "Total"), code = c("P1", "Z1"), value = c(p1, z1))
+formattable(supplies, align=c("l", "l", "r"))
+```
+### Other Deductible Goods and Services
+```{r echo=FALSE}
+e6_rows <- pur_exp[pur_exp$vat.rate == 0,]
+e6 <- sum(e6_rows$amount * e6_rows$allowed)
+ah6_rows <- pur_exp[pur_exp$vat.rate %in% c(0.135),]
+ah6 <- sum(ah6_rows$amount * ah6_rows$allowed)
+bh6_rows <- pur_exp[pur_exp$vat.rate %in% c(0.09),]
+bh6 <- sum(bh6_rows$amount * bh6_rows$allowed)
+r2_rows <- pur_exp[pur_exp$vat.rate %in% c(0.21,0.23),]
+r2 <- sum(r2_rows$amount * r2_rows$allowed)
+z5 <- sum(e6, bh6, ah6, r2)
+
+deductibles <- data.table(label = c("Exempt", "9%", "13.5%", "Std Rate", "Total"), code = c("E6", "BH6", "AH6", "R2", "Z5"), value = c(e6, bh6, ah6, r2, z5))
+formattable(deductibles, align=c("l", "l", "r"))
+```
